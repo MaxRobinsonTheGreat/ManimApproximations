@@ -3,21 +3,8 @@ from torch import nn, optim
 import numpy as np
 from manim import *
 import random
+from models import SimpleNN, SkipConn
 
-
-# Define the neural network architecture
-class SimpleNN(nn.Module):
-    def __init__(self, in_size=1, out_size=1, hidden_size=5, hidden_layers=2):
-        super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(in_size, hidden_size),
-            nn.ReLU(),
-            *[nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.LeakyReLU()) for _ in range(hidden_layers)],
-            nn.Linear(hidden_size, out_size)
-        )
-
-    def forward(self, x):
-        return self.layers(x)
 
 class NetworkLearning(Scene):
     def construct(self):
@@ -158,9 +145,6 @@ class SphereApproximation(ThreeDScene):
         
         u_data = np.arccos(2 * np.random.uniform(0, 1, num_samples) - 1) - np.pi / 2
         v_data = np.random.uniform(0, 2 * np.pi, num_samples)
-        # draw from a normal distribution but only keep the values within the range [-pi/2, pi/2] and [0, 2pi]
-        # u_data = np.random.normal(0, np.pi / 2, num_samples)
-        # v_data = np.random.normal(np.pi, np.pi, num_samples)  
         x_data, y_data, z_data = sphere(u_data, v_data)
 
         data_points = [np.array([x, y, z]) for x, y, z in zip(x_data, y_data, z_data)]
@@ -179,8 +163,8 @@ class SphereApproximation(ThreeDScene):
 
         def shift_values(u, v):
             # shift u and v from [-pi/2, pi/2] and [0, 2pi] to [-1, 1]
-            return [u / (PI / 2), (v / (TAU))-1]
-            # return [u, v]
+            # return [u / (PI / 2), (v / (TAU))-1]
+            return [u, v]
 
         def approx_sphere(u, v):
             inputs = shift_values(u, v)
@@ -223,5 +207,117 @@ class SphereApproximation(ThreeDScene):
             ).set_opacity(0.9)
             self.play(Transform(approx_surface, new_approx_surface), run_time=0.2, rate_func=linear)
             scheduler.step()
+
+        self.wait(1)
+
+
+class SpiralShell(ThreeDScene):
+    def construct(self):
+        r = 1
+        a = 1.25
+        b = 1.25
+        c = 1
+        d = 3.5
+        e = 0
+        f = 0.17
+        h = -1
+        u_range = [-25, 0]
+        v_range = [-4*PI, 4*PI]
+
+        epochs = 30
+        lr = 0.0001
+        num_samples = 2000
+        num_display_samples = 100
+        hidden_size = 100
+        hidden_layers = 10
+        step_size = 15
+        nn_range = [-1, 1]
+
+        def spiral_shell(u, v):
+            exp = pow(np.e, f*u)
+
+            x = r*exp * (-1.4*e + b*np.sin(v))
+            y = r*exp * (d + a*np.cos(v)) * np.sin(c*u)
+            z = r*exp * (d + a*np.cos(v)) * np.cos(c*u) + h
+
+            return np.array([x, y, z])
+
+        # Create the parametric surface
+        surface = Surface(
+            spiral_shell,
+            resolution=(40, 40),
+            u_range=u_range,
+            v_range=v_range,
+            checkerboard_colors=[GOLD, GOLD_E],
+            stroke_color=GOLD_E
+        )
+
+        # u_data = np.random.uniform(-25, 0, num_samples)
+        # v_data = np.random.uniform(-4*PI, 4*PI, num_samples)
+        u_data = -np.random.exponential(scale=7, size=num_samples)
+        u_data = np.clip(u_data, -25, 0)
+        v_data = np.random.uniform(-4*PI, 4*PI, num_samples)
+        x_data, y_data, z_data = spiral_shell(u_data, v_data)
+
+        data_points = [np.array([x, y, z]) for x, y, z in zip(x_data, y_data, z_data)]
+        display_points = random.sample(data_points, num_display_samples)
+
+        # Display the surface
+        self.set_camera_orientation(phi=75 * DEGREES, theta=50 * DEGREES)
+        self.begin_ambient_camera_rotation(rate=0.2)
+        # self.add(surface)
+        # self.add(*[Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2]) for d in display_points])
+        self.wait(2)
+
+        net = SkipConn(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers)
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(net.parameters(), lr=lr)
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.5)
+
+        def shift_value(x, start_range, end_range):
+            return (x - start_range[0]) / (start_range[1] - start_range[0]) * (end_range[1] - end_range[0]) + end_range[0]
+
+        def approx_sphere(u, v):
+            inputs = [shift_value(u, u_range, nn_range), shift_value(v, v_range, nn_range)]
+            return net(torch.Tensor([inputs])).detach().numpy().reshape(-1)
+        
+        approx_surface = Surface(
+            approx_sphere,
+            resolution=(20, 20),
+            u_range=[-PI / 2, PI / 2],
+            v_range=[0, TAU],
+            checkerboard_colors=[BLUE_D, BLUE_E],
+        ).set_opacity(0.9)
+
+        self.add(approx_surface)
+
+        for epoch in range(epochs):
+            random_samples = np.random.permutation(num_samples)
+            tot_loss = 0
+            for i in random_samples:
+                u, v = u_data[i], v_data[i]
+                inputs = torch.Tensor([[shift_value(u, u_range, nn_range), shift_value(v, v_range, nn_range)]])
+                labels = torch.Tensor([[x_data[i], y_data[i], z_data[i]]])
+
+                # Forward pass
+                outputs = net(inputs)
+                loss = criterion(outputs, labels)
+
+                # Backward pass and optimization
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                tot_loss += loss.item()
+            print('Epoch: {}, Loss: {}'.format(epoch, tot_loss / num_samples))
+            scheduler.step()
+            
+        new_approx_surface = Surface(
+            approx_sphere,
+            resolution=(20, 20),
+            u_range=[-PI / 2, PI / 2],
+            v_range=[0, TAU],
+            checkerboard_colors=[BLUE_D, BLUE_E],
+        ).set_opacity(0.9)
+        self.play(Transform(approx_surface, new_approx_surface), run_time=0.2, rate_func=linear)
 
         self.wait(1)
