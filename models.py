@@ -36,6 +36,5 @@ class SkipConn(nn.Module):
 			combined = torch.cat([cur, prev, x], 1)
 			prev = cur
 			cur = self.relu(layer(combined))
-		y = self.outLayer(torch.cat([cur, prev, x], 1))
-		return y
+		return self.outLayer(torch.cat([cur, prev, x], 1))
 		# return self.sig(y)

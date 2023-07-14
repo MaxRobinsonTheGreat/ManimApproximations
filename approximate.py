@@ -108,6 +108,86 @@ class SphereSurface(ThreeDScene):
         self.add(surface)
         self.wait(1)
 
+def shift_value(x, start_range, end_range):
+    return (x - start_range[0]) / (start_range[1] - start_range[0]) * (end_range[1] - end_range[0]) + end_range[0]
+
+def generate_inputs(u_data, v_data, u_range, v_range, nn_range):
+    u = shift_value(u_data, u_range, nn_range)
+    v = shift_value(v_data, v_range, nn_range)
+    inputs = torch.Tensor(np.array([u, v]).T)
+    return inputs
+
+def generate_outputs(x, y, z):
+    return torch.Tensor(np.array([x, y, z]).T)
+
+def generate_display_points(x_data, y_data, z_data, num_display_samples):
+    data_points = [np.array([x, y, z]) for x, y, z in zip(x_data, y_data, z_data)]
+    return random.sample(data_points, num_display_samples)
+
+def ApproximateSurface(scene,
+                       net,
+                       inputs,
+                       outputs,
+                       nn_range,
+                       resolution,
+                       epochs = 10,
+                       lr = 0.001,
+                       batch_size = 20,
+                       sched_step_size = None,
+                       ):
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(net.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=sched_step_size, gamma=0.5)
+
+    num_samples = len(inputs)
+    
+    def approx_surface_func(u, v):
+        return net(torch.Tensor([[u, v]])).detach().numpy().reshape(-1)
+    
+    approx_surface = Surface(
+        approx_surface_func,
+        resolution=resolution,
+        u_range=nn_range,
+        v_range=nn_range,
+        checkerboard_colors=[BLUE_D, BLUE_E],
+    ).set_opacity(0.9)
+
+    scene.add(approx_surface)
+
+    for epoch in range(epochs):
+        index_batches = np.array_split(np.random.permutation(num_samples), batch_size)
+        tot_loss = 0
+        for i in index_batches:
+            ins = inputs[i]
+            outs = outputs[i]
+
+            # Forward pass
+            pred = net(ins)
+            loss = criterion(pred, outs)
+
+            # Backward pass and optimization
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            tot_loss += loss.item()
+        print('Epoch: {}, Loss: {}'.format(epoch, tot_loss / num_samples))
+        scheduler.step()
+        
+        new_approx_surface = Surface(
+            approx_surface_func,
+            resolution=resolution,
+            u_range=nn_range,
+            v_range=nn_range,
+            checkerboard_colors=[BLUE_D, BLUE_E],
+        ).set_opacity(0.9)
+        scene.play(Transform(approx_surface, new_approx_surface), run_time=0.2, rate_func=linear)
+        approx_surface = new_approx_surface
+
+    scene.wait(1)
+
+    return approx_surface
+    
+
 
 class SphereApproximation(ThreeDScene):
     def construct(self):
@@ -115,11 +195,15 @@ class SphereApproximation(ThreeDScene):
         size = 3
         epochs = 50
         lr = 0.001
+        batch_size = 20
         num_samples = 500
         num_display_samples = 100
         hidden_size = 20
         hidden_layers = 5
         step_size = 15
+        u_range = [-PI / 2, PI / 2]
+        v_range = [0, TAU]
+        nn_range = [-1, 1]
 
         def sphere(u, v):
             return np.array([
@@ -132,8 +216,8 @@ class SphereApproximation(ThreeDScene):
         true_surface = Surface(
             sphere,
             resolution=(20, 20),
-            u_range=[-PI / 2, PI / 2],
-            v_range=[0, TAU],
+            u_range=u_range,
+            v_range=v_range,
             checkerboard_colors=[PURPLE_D, PURPLE_E],
         ).set_opacity(0.9)
 
@@ -147,9 +231,9 @@ class SphereApproximation(ThreeDScene):
         v_data = np.random.uniform(0, 2 * np.pi, num_samples)
         x_data, y_data, z_data = sphere(u_data, v_data)
 
-        data_points = [np.array([x, y, z]) for x, y, z in zip(x_data, y_data, z_data)]
-        display_points = random.sample(data_points, num_display_samples)
-        print(len(display_points), len(data_points))
+        display_points = generate_display_points(x_data, y_data, z_data, num_display_samples)
+        inputs = generate_inputs(u_data, v_data, u_range, v_range, nn_range)
+        outputs = generate_outputs(x_data, y_data, z_data)
 
         # Draw the sampled data points
         self.play(*[FadeIn(Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2])) for d in display_points])
@@ -157,62 +241,31 @@ class SphereApproximation(ThreeDScene):
         # self.wait(5)
 
         net = SimpleNN(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers)
-        criterion = nn.MSELoss()
-        optimizer = optim.Adam(net.parameters(), lr=lr)
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.5)
-
-        def shift_values(u, v):
-            # shift u and v from [-pi/2, pi/2] and [0, 2pi] to [-1, 1]
-            # return [u / (PI / 2), (v / (TAU))-1]
-            return [u, v]
-
-        def approx_sphere(u, v):
-            inputs = shift_values(u, v)
-            return net(torch.Tensor([inputs])).detach().numpy().reshape(-1)
         
-        approx_surface = Surface(
-            approx_sphere,
-            resolution=(20, 20),
-            u_range=[-PI / 2, PI / 2],
-            v_range=[0, TAU],
-            checkerboard_colors=[BLUE_D, BLUE_E],
-        ).set_opacity(0.9)
-
-        self.add(approx_surface)
-
-        for epoch in range(epochs):
-            random_samples = np.random.permutation(num_samples)
-            tot_loss = 0
-            for i in random_samples:
-                inputs = torch.Tensor([shift_values(u_data[i], v_data[i])])
-                labels = torch.Tensor([[x_data[i], y_data[i], z_data[i]]])
-
-                # Forward pass
-                outputs = net(inputs)
-                loss = criterion(outputs, labels)
-
-                # Backward pass and optimization
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                tot_loss += loss.item()
-            print('Epoch: {}, Loss: {}'.format(epoch, tot_loss / num_samples))
-            
-            new_approx_surface = Surface(
-                approx_sphere,
-                resolution=(20, 20),
-                u_range=[-PI / 2, PI / 2],
-                v_range=[0, TAU],
-                checkerboard_colors=[BLUE_D, BLUE_E],
-            ).set_opacity(0.9)
-            self.play(Transform(approx_surface, new_approx_surface), run_time=0.2, rate_func=linear)
-            scheduler.step()
-
-        self.wait(1)
+        approx_surface = ApproximateSurface(self,
+                                            net,
+                                            inputs,
+                                            outputs,
+                                            nn_range,
+                                            resolution=(20, 20),
+                                            epochs=epochs,
+                                            lr=lr,
+                                            batch_size=20,
+                                            sched_step_size=step_size)
 
 
 class SpiralShell(ThreeDScene):
     def construct(self):
+        epochs = 3
+        lr = 0.001
+        batch_size = 20
+        num_samples = 2000
+        num_display_samples = 200
+        hidden_size = 200
+        hidden_layers = 20
+        step_size = 20
+        nn_range = [-1, 1]
+    
         r = 1
         a = 1.25
         b = 1.25
@@ -224,14 +277,8 @@ class SpiralShell(ThreeDScene):
         u_range = [-25, 0]
         v_range = [-4*PI, 4*PI]
 
-        epochs = 30
-        lr = 0.0001
-        num_samples = 2000
-        num_display_samples = 100
-        hidden_size = 100
-        hidden_layers = 10
-        step_size = 15
-        nn_range = [-1, 1]
+        self.set_camera_orientation(phi=75 * DEGREES, theta=50 * DEGREES)
+        self.begin_ambient_camera_rotation(rate=0.2)
 
         def spiral_shell(u, v):
             exp = pow(np.e, f*u)
@@ -252,72 +299,31 @@ class SpiralShell(ThreeDScene):
             stroke_color=GOLD_E
         )
 
-        # u_data = np.random.uniform(-25, 0, num_samples)
-        # v_data = np.random.uniform(-4*PI, 4*PI, num_samples)
         u_data = -np.random.exponential(scale=7, size=num_samples)
-        u_data = np.clip(u_data, -25, 0)
-        v_data = np.random.uniform(-4*PI, 4*PI, num_samples)
+        u_data = np.clip(u_data, u_range[0], u_range[1])
+        v_data = np.random.uniform(v_range[0], v_range[1], num_samples)
         x_data, y_data, z_data = spiral_shell(u_data, v_data)
-
-        data_points = [np.array([x, y, z]) for x, y, z in zip(x_data, y_data, z_data)]
-        display_points = random.sample(data_points, num_display_samples)
-
-        # Display the surface
-        self.set_camera_orientation(phi=75 * DEGREES, theta=50 * DEGREES)
-        self.begin_ambient_camera_rotation(rate=0.2)
+        
+        display_points = generate_display_points(x_data, y_data, z_data, num_display_samples)
+        inputs = generate_inputs(u_data, v_data, u_range, v_range, nn_range)
+        outputs = generate_outputs(x_data, y_data, z_data)
+        
         # self.add(surface)
-        # self.add(*[Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2]) for d in display_points])
-        self.wait(2)
+        self.add(*[Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2]) for d in display_points])
+        self.wait()
 
         net = SkipConn(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers)
-        criterion = nn.MSELoss()
-        optimizer = optim.Adam(net.parameters(), lr=lr)
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.5)
 
-        def shift_value(x, start_range, end_range):
-            return (x - start_range[0]) / (start_range[1] - start_range[0]) * (end_range[1] - end_range[0]) + end_range[0]
-
-        def approx_sphere(u, v):
-            inputs = [shift_value(u, u_range, nn_range), shift_value(v, v_range, nn_range)]
-            return net(torch.Tensor([inputs])).detach().numpy().reshape(-1)
-        
-        approx_surface = Surface(
-            approx_sphere,
-            resolution=(20, 20),
-            u_range=[-PI / 2, PI / 2],
-            v_range=[0, TAU],
-            checkerboard_colors=[BLUE_D, BLUE_E],
-        ).set_opacity(0.9)
-
-        self.add(approx_surface)
-
-        for epoch in range(epochs):
-            random_samples = np.random.permutation(num_samples)
-            tot_loss = 0
-            for i in random_samples:
-                u, v = u_data[i], v_data[i]
-                inputs = torch.Tensor([[shift_value(u, u_range, nn_range), shift_value(v, v_range, nn_range)]])
-                labels = torch.Tensor([[x_data[i], y_data[i], z_data[i]]])
-
-                # Forward pass
-                outputs = net(inputs)
-                loss = criterion(outputs, labels)
-
-                # Backward pass and optimization
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                tot_loss += loss.item()
-            print('Epoch: {}, Loss: {}'.format(epoch, tot_loss / num_samples))
-            scheduler.step()
-            
-        new_approx_surface = Surface(
-            approx_sphere,
-            resolution=(20, 20),
-            u_range=[-PI / 2, PI / 2],
-            v_range=[0, TAU],
-            checkerboard_colors=[BLUE_D, BLUE_E],
-        ).set_opacity(0.9)
-        self.play(Transform(approx_surface, new_approx_surface), run_time=0.2, rate_func=linear)
-
+        approx_surface = ApproximateSurface(self, 
+                                            net, 
+                                            inputs, 
+                                            outputs, 
+                                            nn_range,
+                                            resolution=(30, 30),
+                                            epochs=epochs, 
+                                            lr=lr, 
+                                            batch_size=batch_size, 
+                                            sched_step_size=step_size)
         self.wait(1)
+
+
