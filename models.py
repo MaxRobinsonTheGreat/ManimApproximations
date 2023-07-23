@@ -15,6 +15,7 @@ class SimpleNN(nn.Module):
     def forward(self, x):
         return self.layers(x)
     
+
 class SkipConn(nn.Module):
 	def __init__(self, in_size=1, out_size=1, hidden_size=100, hidden_layers=7):
 		super(SkipConn,self).__init__()
@@ -38,3 +39,17 @@ class SkipConn(nn.Module):
 			cur = self.relu(layer(combined))
 		return self.outLayer(torch.cat([cur, prev, x], 1))
 		# return self.sig(y)
+
+
+class Fourier(nn.Module):
+	def __init__(self, in_size=1, out_size=1, fourier_order=4, hidden_size=100, hidden_layers=7):
+		super(Fourier,self).__init__()
+		self.fourier_order = fourier_order
+		self.inner_model = SkipConn(in_size=in_size+fourier_order*4, out_size=out_size, hidden_size=hidden_size, hidden_layers=hidden_layers)
+		self.orders = torch.arange(1, fourier_order + 1).float()
+
+	def forward(self,x):
+		x = x.unsqueeze(-1)  # add an extra dimension for broadcasting
+		fourier_features = torch.cat([torch.sin(self.orders * x), torch.cos(self.orders * x), x], dim=-1)
+		fourier_features = fourier_features.view(x.shape[0], -1)  # flatten the last two dimensions
+		return self.inner_model(fourier_features)

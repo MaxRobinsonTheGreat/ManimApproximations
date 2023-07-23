@@ -3,7 +3,7 @@ from torch import nn, optim
 import numpy as np
 from manim import *
 import random
-from models import SimpleNN, SkipConn
+from models import SimpleNN, SkipConn, Fourier
 
 
 class NetworkLearning(Scene):
@@ -66,7 +66,7 @@ class NetworkLearning(Scene):
                 if i % frame_rate == 0:  # Update the graph every 20 samples
                     y_graph_approx = net(torch.Tensor(x_data).view(-1, 1)).detach().numpy().reshape(-1)
                     new_approx_graph = self.get_graph(x_graph, y_graph_approx, color=RED)
-                    self.play(Transform(approx_graph, new_approx_graph), run_time=0.1, rate_func=linear)
+                    self.play(ReplacementTransform(approx_graph, new_approx_graph), run_time=0.1, rate_func=linear)
 
         self.wait()
 
@@ -111,10 +111,11 @@ class SphereSurface(ThreeDScene):
 def shift_value(x, start_range, end_range):
     return (x - start_range[0]) / (start_range[1] - start_range[0]) * (end_range[1] - end_range[0]) + end_range[0]
 
-def generate_inputs(u_data, v_data, u_range, v_range, nn_range):
-    u = shift_value(u_data, u_range, nn_range)
-    v = shift_value(v_data, v_range, nn_range)
-    inputs = torch.Tensor(np.array([u, v]).T)
+def generate_inputs(u_data, v_data, u_range, v_range, nn_range=None):
+    if nn_range is not None:
+        u_data = shift_value(u_data, u_range, nn_range)
+        v_data = shift_value(v_data, v_range, nn_range)
+    inputs = torch.Tensor(np.array([u_data, v_data]).T)
     return inputs
 
 def generate_outputs(x, y, z):
@@ -124,7 +125,57 @@ def generate_display_points(x_data, y_data, z_data, num_display_samples):
     data_points = [np.array([x, y, z]) for x, y, z in zip(x_data, y_data, z_data)]
     return random.sample(data_points, num_display_samples)
 
-def ApproximateSurface(scene,
+def precomute_net_outputs(scene, net, u_range, v_range, resolution):
+    # precomputes the outputs of the network for each point in the resolution for a Manim Surface
+    # returns a function that takes in u, v and returns the output of the network
+
+    # first create an empty list of inputs and make a dummy function that saves the inputs to the list and returns 0,0,0
+    # then add the dummy surface to the scene and remove it which will save the inputs to the list
+    # then use the list of inputs to generate the outputs of the network
+    # then create a new function that takes in u, v and returns the precomputed output of the network
+    # return the function
+
+    # this is hacky but dramatically speeds up the animation as we can now batch the network inputs
+    
+    inputs = []
+    def dummy_func(u, v):
+        inputs.append([u, v])
+        return np.array([0., 0., 0.])
+    
+    dummy_surface = Surface(
+        dummy_func,
+        resolution=resolution,
+        u_range=u_range,
+        v_range=v_range,
+        checkerboard_colors=[BLUE_D, BLUE_E],
+    ).set_opacity(0)
+
+    print('generating inputs...')
+    scene.add(dummy_surface)
+    scene.remove(dummy_surface)
+    print('inputs generated')
+
+    net_inputs = torch.Tensor(inputs)
+    outputs = net(net_inputs).detach().numpy()
+
+    # print the largest and smallest inputs
+    # print('largest input: ', inputs.max(dim=0))
+    # print('smallest input: ', inputs.min(dim=0))
+    
+    input_output_map = {}
+    print('generating map...')
+    for i in range(len(inputs)):
+        input_output_map[(inputs[i][0].item(), inputs[i][1].item())] = outputs[i]
+    print('map generated')
+
+    def approx_surface_func(u, v):
+        return input_output_map[(u, v)]
+    
+    return approx_surface_func
+
+
+
+def approximate_surface(scene,
                        net,
                        inputs,
                        outputs,
@@ -141,8 +192,7 @@ def ApproximateSurface(scene,
 
     num_samples = len(inputs)
     
-    def approx_surface_func(u, v):
-        return net(torch.Tensor([[u, v]])).detach().numpy().reshape(-1)
+    approx_surface_func = precomute_net_outputs(scene, net, nn_range, nn_range, resolution)
     
     approx_surface = Surface(
         approx_surface_func,
@@ -172,6 +222,7 @@ def ApproximateSurface(scene,
             tot_loss += loss.item()
         print('Epoch: {}, Loss: {}'.format(epoch, tot_loss / num_samples))
         scheduler.step()
+        approx_surface_func = precomute_net_outputs(scene, net, nn_range, nn_range, resolution)
         
         new_approx_surface = Surface(
             approx_surface_func,
@@ -180,9 +231,9 @@ def ApproximateSurface(scene,
             v_range=nn_range,
             checkerboard_colors=[BLUE_D, BLUE_E],
         ).set_opacity(0.9)
-        scene.play(Transform(approx_surface, new_approx_surface), run_time=0.2, rate_func=linear)
+        scene.play(ReplacementTransform(approx_surface, new_approx_surface), run_time=0.2, rate_func=linear)
         approx_surface = new_approx_surface
-
+    scene.add(approx_surface)
     scene.wait(1)
 
     return approx_surface
@@ -193,17 +244,19 @@ class SphereApproximation(ThreeDScene):
     def construct(self):
         # Define the parametric surface function for a sphere
         size = 3
-        epochs = 50
+        epochs = 10
         lr = 0.001
         batch_size = 20
-        num_samples = 500
+        num_samples = 1000
         num_display_samples = 100
-        hidden_size = 20
-        hidden_layers = 5
+        hidden_size = 50
+        hidden_layers = 7
+        nn_range = [-PI, PI]
         step_size = 15
+
+        resolution = (80, 80)
         u_range = [-PI / 2, PI / 2]
         v_range = [0, TAU]
-        nn_range = [-1, 1]
 
         def sphere(u, v):
             return np.array([
@@ -215,7 +268,7 @@ class SphereApproximation(ThreeDScene):
         # Create the parametric surface that is slightly transparent
         true_surface = Surface(
             sphere,
-            resolution=(20, 20),
+            resolution=resolution,
             u_range=u_range,
             v_range=v_range,
             checkerboard_colors=[PURPLE_D, PURPLE_E],
@@ -224,8 +277,8 @@ class SphereApproximation(ThreeDScene):
         # Display the surface
         self.set_camera_orientation(phi=75 * DEGREES, theta=30 * DEGREES)
         self.begin_ambient_camera_rotation(rate=-0.1)
-        self.play(Create(true_surface))
-        self.wait(1)
+        # self.play(Create(true_surface))
+        # self.wait(1)
         
         u_data = np.arccos(2 * np.random.uniform(0, 1, num_samples) - 1) - np.pi / 2
         v_data = np.random.uniform(0, 2 * np.pi, num_samples)
@@ -236,35 +289,35 @@ class SphereApproximation(ThreeDScene):
         outputs = generate_outputs(x_data, y_data, z_data)
 
         # Draw the sampled data points
-        self.play(*[FadeIn(Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2])) for d in display_points])
-        self.play(FadeOut(true_surface))
+        # self.play(*[FadeIn(Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2])) for d in display_points])
+        # self.play(FadeOut(true_surface))
         # self.wait(5)
 
-        net = SimpleNN(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers)
+        net = Fourier(in_size=2, out_size=3, fourier_order=8, hidden_size=hidden_size, hidden_layers=hidden_layers)
         
-        approx_surface = ApproximateSurface(self,
+        approx_surface = approximate_surface(self,
                                             net,
                                             inputs,
                                             outputs,
                                             nn_range,
-                                            resolution=(20, 20),
+                                            resolution=resolution,
                                             epochs=epochs,
                                             lr=lr,
-                                            batch_size=20,
+                                            batch_size=batch_size,
                                             sched_step_size=step_size)
 
 
-class SpiralShell(ThreeDScene):
+class SpiralApproximation(ThreeDScene):
     def construct(self):
-        epochs = 3
+        epochs = 200
         lr = 0.001
         batch_size = 20
-        num_samples = 2000
-        num_display_samples = 200
-        hidden_size = 200
-        hidden_layers = 20
-        step_size = 20
-        nn_range = [-1, 1]
+        num_samples = 3000
+        num_display_samples = 300
+        hidden_size = 100
+        hidden_layers = 10
+        step_size = 5
+        nn_range = [-PI, PI]
     
         r = 1
         a = 1.25
@@ -276,6 +329,7 @@ class SpiralShell(ThreeDScene):
         h = -1
         u_range = [-25, 0]
         v_range = [-4*PI, 4*PI]
+        resolution=(40, 40)
 
         self.set_camera_orientation(phi=75 * DEGREES, theta=50 * DEGREES)
         self.begin_ambient_camera_rotation(rate=0.2)
@@ -292,7 +346,7 @@ class SpiralShell(ThreeDScene):
         # Create the parametric surface
         surface = Surface(
             spiral_shell,
-            resolution=(40, 40),
+            resolution=resolution,
             u_range=u_range,
             v_range=v_range,
             checkerboard_colors=[GOLD, GOLD_E],
@@ -308,18 +362,21 @@ class SpiralShell(ThreeDScene):
         inputs = generate_inputs(u_data, v_data, u_range, v_range, nn_range)
         outputs = generate_outputs(x_data, y_data, z_data)
         
-        # self.add(surface)
+        self.play(Create(surface))
+        self.wait(2)
         self.add(*[Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2]) for d in display_points])
         self.wait()
+        self.play(Uncreate(surface), run_time=2)
 
-        net = SkipConn(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers)
+        # net = SkipConn(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers)
+        net = Fourier(in_size=2, out_size=3, fourier_order=16, hidden_size=hidden_size, hidden_layers=hidden_layers)
 
-        approx_surface = ApproximateSurface(self, 
+        approx_surface = approximate_surface(self, 
                                             net, 
                                             inputs, 
                                             outputs, 
                                             nn_range,
-                                            resolution=(30, 30),
+                                            resolution=resolution,
                                             epochs=epochs, 
                                             lr=lr, 
                                             batch_size=batch_size, 
@@ -327,3 +384,55 @@ class SpiralShell(ThreeDScene):
         self.wait(1)
 
 
+class CubeApproximation(ThreeDScene):
+    def construct(self):
+        epochs = 1
+        lr = 0.001
+        batch_size = 20
+        num_samples = 500
+        num_display_samples = 300
+        hidden_size = 100
+        hidden_layers = 10
+        step_size = 5
+        nn_range = [-1, 1]
+
+        u_range = [-1, 1]
+        v_range = [-1, 1]
+        resolution=(20, 20)
+
+        self.set_camera_orientation(phi=75 * DEGREES, theta=50 * DEGREES)
+        self.begin_ambient_camera_rotation(rate=0.2)
+
+        range_size = u_range[1]-u_range[0]
+        num_faces = 4
+        step_size = range_size / num_faces
+        offset = range_size/2
+        def cube(u, v):
+            if (u <= -step_size):
+                return np.array([(u+step_size)*num_faces, v, offset])
+            if (u <= 0):
+                return np.array([0, v, -(u+step_size)*num_faces + offset])
+            if (u <= step_size):
+                return np.array([-u*num_faces, v, -num_faces/2 + offset])
+            return np.array([-num_faces/2, v, (u-step_size*2)*num_faces + offset])
+        
+        # Create the parametric surface
+        surface = Surface(
+            cube,
+            resolution=resolution,
+            u_range=u_range,
+            v_range=v_range,
+            checkerboard_colors=[BLUE_D, BLUE_E],
+            should_make_jagged=True
+        )
+
+        # u_data = np.random.uniform(u_range[0], u_range[1], num_samples)
+        # v_data = np.random.uniform(v_range[0], v_range[1], num_samples)
+        # x_data, y_data, z_data = cube(u_data, v_data)
+
+        # display_points = generate_display_points(x_data, y_data, z_data, num_display_samples)
+
+        # self.play(*[FadeIn(Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2])) for d in display_points])
+
+        self.add(surface)
+        self.wait(2)
