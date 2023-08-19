@@ -3,89 +3,317 @@ from torch import nn, optim
 import numpy as np
 from manim import *
 import random
-from models import SimpleNN, SkipConn, Fourier
+from models import SimpleNN, SkipConn, Fourier, SimpleTaylorNN, TaylorNN
 
 
-class NetworkLearning(Scene):
-    def construct(self):
-        epochs = 50
-        lr = 0.01
-        frame_rate = 20
-        num_samples = 200
-        hidden_size = 5
-        hidden_layers = 2
-        x_min = -2 * np.pi
-        x_max = 2 * np.pi
+def LearnCurve( scene,
+                target_function,
+                net,
+                epochs = 10,
+                lr = 0.005,
+                batch_size = 20,
+                frame_rate = 5,
+                frame_duration = 0.1,
+                num_samples = 300,
+                x_range = [-PI, PI],
+                sched_step = 10,
+                smooth = True,
+                show_loss = False, 
+                show_weights = False,):
 
-        # Define the target function
-        def target_function(x):
-            return np.sin(x)
+        ax = Axes(
+            x_range=x_range, y_range=[-3, 3],axis_config={"include_tip": False}
+        ).scale(1.3)
 
         # Create the dataset
-        x_data = np.linspace(x_min, x_max, num_samples)
+        x_data = np.random.uniform(x_range[0], x_range[1], num_samples)
         y_data = target_function(x_data)
 
-        # Initialize the network, loss function and optimizer
-        net = SimpleNN(hidden_size=hidden_size, hidden_layers=hidden_layers)
-        criterion = nn.MSELoss()
         optimizer = optim.Adam(net.parameters(), lr=lr)
+        # criteron = lambda x, y: torch.mean(torch.abs(x - y))
+        criteron = nn.MSELoss()
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=sched_step, gamma=0.5)
 
-        # Transform the data for visualization
-        x_graph = x_data # / (2 * np.pi) * 5
-        y_graph_target = y_data 
-        y_graph_approx = net(torch.Tensor(x_data).view(-1, 1)).detach().numpy().reshape(-1)
+        def approx_func(x):
+            return net(torch.tensor([[x]], dtype=torch.float32)).squeeze().cpu().detach().numpy()
 
         # Draw the target function
-        target_graph = self.get_graph(x_graph, y_graph_target, color=BLUE)
-        self.play(Create(target_graph))
-
-        # Draw the sampled data points
-        data_points = self.get_data_points(x_graph, y_graph_target)
-        self.play(FadeIn(data_points))
+        target_graph = ax.plot(target_function, x_range=x_range, color=PURPLE, use_smoothing=smooth)
+        scene.play(Create(target_graph))
+        scene.wait()
+        scene.play(FadeOut(target_graph))
+        points = [ax.c2p(x, y) for x, y in zip(x_data, y_data)]
+        data_points = [Dot(point=coord, color=RED, radius=0.05) for coord in points]
+        data_points = VGroup(*data_points)
+        scene.play(Create(data_points))
 
         # Draw the initial approximated function
-        approx_graph = self.get_graph(x_graph, y_graph_approx, color=RED)
-        self.play(Create(approx_graph))
+        approx_graph = ax.plot(approx_func, x_range=x_range, color=BLUE)
+        scene.play(Create(approx_graph))
+
+        if show_loss:
+            loss_label = MathTex('Loss: ', '{:.4f}'.format(0)).scale(1.5).to_corner(UL)
+            scene.add(loss_label)
+
+        if show_weights:
+            weights_matricies = create_weights_matricies(net)
+            scene.add(weights_matricies)
 
         # Start the training process
         for epoch in range(epochs):
-            perm = np.random.permutation(num_samples)
-            for i in perm:
-                inputs = torch.Tensor([[x_data[i]]])
-                labels = torch.Tensor([[y_data[i]]])
+            batches = np.array_split(np.random.permutation(num_samples), batch_size)
+            running_loss = 0
+            for i, indices in enumerate(batches):
+                inputs = torch.Tensor([[x] for x in x_data[indices]])
+                labels = torch.Tensor([[y] for y in y_data[indices]])
 
                 # Forward pass
                 outputs = net(inputs)
-                loss = criterion(outputs, labels)
+                # compute average absolute difference between outputs and labels
+                loss = criteron(outputs, labels)
 
                 # Backward pass and optimization
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
-                if i % frame_rate == 0:  # Update the graph every 20 samples
-                    y_graph_approx = net(torch.Tensor(x_data).view(-1, 1)).detach().numpy().reshape(-1)
-                    new_approx_graph = self.get_graph(x_graph, y_graph_approx, color=RED)
-                    self.play(ReplacementTransform(approx_graph, new_approx_graph), run_time=0.1, rate_func=linear)
+                running_loss += loss.item()
+                if i % frame_rate == 0: 
+                    new_approx_graph = ax.plot(approx_func, x_range=x_range, color=BLUE)
+                    scene.play(ReplacementTransform(approx_graph, new_approx_graph), run_time=frame_duration, rate_func=linear)
+                    approx_graph = new_approx_graph
+                    scene.add(approx_graph)
 
+                    if show_loss:
+                        scene.remove(loss_label)
+                        avg_loss = running_loss / (i+1)
+                        loss_label = MathTex('Loss: ', '{:.4f}'.format(avg_loss)).scale(1.5).to_corner(UL)
+                        scene.add(loss_label)
+
+                    if show_weights:
+                        scene.remove(weights_matricies)
+                        weights_matricies = create_weights_matricies(net)
+                        scene.add(weights_matricies)
+
+            print('Epoch: {}, Loss: {:.10f}'.format(epoch, running_loss / num_samples))
+            scheduler.step()
+        scene.wait()
+        scene.remove(ax, approx_graph, data_points)
+
+
+def create_weights_matricies(net):
+    matricies = []
+    bias, weight = None, None
+    for name, param in net.named_parameters():
+        if name.find('bias') != -1:
+            bias = param.data
+        elif name.find('weight') != -1:
+            weight = param.data
+        if bias is not None and weight is not None:
+            # print(bias, weight)
+            bias = bias.unsqueeze(1)
+            matrix = torch.cat((bias, weight), dim=1).numpy()
+            # round to 3 decimal places
+            matrix = np.round(matrix, 3)
+            bias, weight = None, None
+            # display matrix as mojbect
+            matrix = Matrix(matrix, h_buff=2)
+            if len(matricies) > 0:
+                matrix.next_to(matricies[-1], RIGHT)
+            matricies.append(matrix)
+    group = VGroup(*matricies).center().shift(DOWN)
+    return group
+
+
+class LearnSimple(Scene):
+    def construct(self):
+        net = SkipConn(hidden_size=50, hidden_layers=7)
+
+        def sine(x):
+            return np.sin(3*x)
+
+        LearnCurve(self, sine, net,
+                    epochs=30,
+                    lr=0.001,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=300,
+                    x_range=[-PI, PI],
+                    sched_step=10,
+                    smooth=True)
+        
+        def wavey(x):
+            return np.sin(2*x) - np.cos(3*x)
+        
+        LearnCurve(self, wavey, net,
+            epochs=10,
+            lr=0.001,
+            batch_size=20,
+            frame_rate=5,
+            frame_duration=0.2,
+            num_samples=300,
+            x_range=[-PI, PI],
+            sched_step=10,
+            smooth=True)
+
+        def gassian(x):
+            return 2*np.exp(-x**2)
+        
+        LearnCurve(self, gassian, net,
+                    epochs=10,
+                    lr=0.001,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=300,
+                    x_range=[-PI, PI],
+                    sched_step=5,
+                    smooth=True)
+        
+        def cubic(x):
+            return x**3/5
+        
+        LearnCurve(self, cubic, net,
+            epochs=10,
+            lr=0.001,
+            batch_size=20,
+            frame_rate=5,
+            frame_duration=0.2,
+            num_samples=300,
+            x_range=[-PI, PI],
+            sched_step=5,
+            smooth=True)
+        
+        def piecewise(x):
+            return -abs(x)/4 + abs(2+x) - abs(2*x+1)/2
+        
+        LearnCurve(self, piecewise, net,
+                epochs=10,
+                lr=0.001,
+                batch_size=20,
+                frame_rate=5,
+                frame_duration=0.2,
+                num_samples=300,
+                x_range=[-PI, PI],
+                sched_step=5,
+                smooth=False)
+        
+
+class LearnTiny(Scene):
+    def construct(self):
+        net = SimpleNN(hidden_size=2, hidden_layers=0)
+
+        def target_function(x):
+            return abs(x)
+
+        LearnCurve(self, target_function, net,
+                    epochs=10,
+                    lr=0.01,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=200,
+                    x_range=[-PI, PI],
+                    sched_step=10,
+                    smooth=False,
+                    show_weights=True)
+
+
+class LearnWithLoss(Scene):
+    def construct(self):
+        net = SkipConn(hidden_size=100, hidden_layers=10)
+
+        def target(x):
+            return 2*abs(np.cos(2*x))-1
+
+        LearnCurve(self, target, net,
+                    epochs=30,
+                    lr=0.001,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=300,
+                    x_range=[-PI, PI],
+                    sched_step=10,
+                    smooth=True,
+                    show_loss=True)
+        
+        
+class LearnTaylor(Scene):
+    def construct(self):
+        net = SimpleTaylorNN(taylor_order=8)
+
+        def target_function(x):
+            return np.sin(2*x) - np.cos(3*x)
+
+        LearnCurve(self, target_function, net,
+                    epochs=50,
+                    lr=0.01,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=300,
+                    x_range=[-PI, PI],
+                    sched_step=10,
+                    smooth=True)
+
+        net = TaylorNN(taylor_order=8, hidden_size=100, hidden_layers=7)
+        LearnCurve(self, target_function, net,
+                    epochs=50,
+                    lr=0.01,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=300,
+                    x_range=[-PI, PI],
+                    sched_step=10,
+                    smooth=True)
         self.wait()
 
-    def get_graph(self, x_data, y_data, color=WHITE):
-        points = [np.array([x, y, 0]) for x, y in zip(x_data, y_data)]
-        line_graph = VMobject()
-        line_graph.set_points_as_corners(points)
-        line_graph.set_color(color)
-        return line_graph
 
-    def get_data_points(self, x_data, y_data):
-        points = [Dot(point=[x, y, 0], color=YELLOW, radius=0.05) for x, y in zip(x_data, y_data)]
-        return VGroup(*points)
+class LearnFourier(Scene):
+    def construct(self):
+        net = Fourier(fourier_order=16, hidden_size=100, hidden_layers=7)
+
+        def target_function(x):
+            return abs(x)/4 - abs(2+x) + abs(3*x+3)/2 - 1
+
+        LearnCurve(self, target_function, net,
+                    epochs=20,
+                    lr=0.001,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=300,
+                    x_range=[-PI, PI],
+                    sched_step=10,
+                    smooth=False)
+
+
+class FourierOverfit(Scene):
+    def construct(self):
+        net = Fourier(fourier_order=32, hidden_size=50, hidden_layers=5)
+
+        def target_function(x):
+            return abs(x)/4 - abs(2+x) + abs(3*x+3)/2 - 1
+
+        LearnCurve(self, target_function, net,
+                    epochs=50,
+                    lr=0.001,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=100,
+                    x_range=[-PI, PI],
+                    sched_step=15,
+                    smooth=False)
 
 
 class SphereSurface(ThreeDScene):
     def construct(self):
         # Define the parametric surface function for a sphere
-        scalar = 2
+        scalar = 3
         def sphere(u, v):
             return np.array([
                 scalar * np.cos(u) * np.cos(v),
@@ -96,17 +324,18 @@ class SphereSurface(ThreeDScene):
         # Create the parametric surface
         surface = Surface(
             sphere,
-            resolution=(20, 20),
+            resolution=(40, 40),
             u_range=[-PI / 2, PI / 2],
             v_range=[0, TAU],
-            checkerboard_colors=[BLUE_D, BLUE_E],
-        )
+            checkerboard_colors=[PURPLE_D, PURPLE_E],
+        ).set_opacity(0.9)
 
         # Display the surface
-        self.set_camera_orientation(phi=75 * DEGREES, theta=30 * DEGREES)
-        self.begin_ambient_camera_rotation(rate=0.1)
-        self.add(surface)
-        self.wait(1)
+        self.set_camera_orientation(phi=80 * DEGREES, theta=30 * DEGREES)
+        self.begin_ambient_camera_rotation(rate=-0.1)
+        self.play(Create(surface), run_time=2)
+        self.wait(10)
+
 
 def shift_value(x, start_range, end_range):
     return (x - start_range[0]) / (start_range[1] - start_range[0]) * (end_range[1] - end_range[0]) + end_range[0]
@@ -136,7 +365,6 @@ def precomute_net_outputs(scene, net, u_range, v_range, resolution):
     # return the function
 
     # this is hacky but dramatically speeds up the animation as we can now batch the network inputs
-    
     inputs = []
     def dummy_func(u, v):
         inputs.append([u, v])
@@ -150,10 +378,8 @@ def precomute_net_outputs(scene, net, u_range, v_range, resolution):
         checkerboard_colors=[BLUE_D, BLUE_E],
     ).set_opacity(0)
 
-    print('generating inputs...')
     scene.add(dummy_surface)
     scene.remove(dummy_surface)
-    print('inputs generated')
 
     net_inputs = torch.Tensor(inputs)
     outputs = net(net_inputs).detach().numpy()
@@ -163,10 +389,8 @@ def precomute_net_outputs(scene, net, u_range, v_range, resolution):
     # print('smallest input: ', inputs.min(dim=0))
     
     input_output_map = {}
-    print('generating map...')
     for i in range(len(inputs)):
         input_output_map[(inputs[i][0].item(), inputs[i][1].item())] = outputs[i]
-    print('map generated')
 
     def approx_surface_func(u, v):
         return input_output_map[(u, v)]
@@ -220,7 +444,7 @@ def approximate_surface(scene,
             loss.backward()
             optimizer.step()
             tot_loss += loss.item()
-        print('Epoch: {}, Loss: {}'.format(epoch, tot_loss / num_samples))
+        print('Epoch: {}, Loss: {:.10f}'.format(epoch, tot_loss / num_samples))
         scheduler.step()
         approx_surface_func = precomute_net_outputs(scene, net, nn_range, nn_range, resolution)
         
@@ -231,33 +455,30 @@ def approximate_surface(scene,
             v_range=nn_range,
             checkerboard_colors=[BLUE_D, BLUE_E],
         ).set_opacity(0.9)
-        scene.play(ReplacementTransform(approx_surface, new_approx_surface), run_time=0.2, rate_func=linear)
+        scene.play(ReplacementTransform(approx_surface, new_approx_surface), run_time=0.3, rate_func=linear)
         approx_surface = new_approx_surface
-    scene.add(approx_surface)
-    scene.wait(1)
+        scene.add(approx_surface)
 
     return approx_surface
     
 
-
 class SphereApproximation(ThreeDScene):
     def construct(self):
         # Define the parametric surface function for a sphere
-        size = 3
-        epochs = 10
+        epochs = 100
         lr = 0.001
         batch_size = 20
         num_samples = 1000
-        num_display_samples = 100
+        num_display_samples = 200
         hidden_size = 50
         hidden_layers = 7
         nn_range = [-PI, PI]
         step_size = 15
 
-        resolution = (80, 80)
+        size = 3
+        resolution = (40, 40)
         u_range = [-PI / 2, PI / 2]
         v_range = [0, TAU]
-
         def sphere(u, v):
             return np.array([
                 size * np.cos(u) * np.cos(v),
@@ -273,12 +494,10 @@ class SphereApproximation(ThreeDScene):
             v_range=v_range,
             checkerboard_colors=[PURPLE_D, PURPLE_E],
         ).set_opacity(0.9)
-
         # Display the surface
         self.set_camera_orientation(phi=75 * DEGREES, theta=30 * DEGREES)
         self.begin_ambient_camera_rotation(rate=-0.1)
-        # self.play(Create(true_surface))
-        # self.wait(1)
+
         
         u_data = np.arccos(2 * np.random.uniform(0, 1, num_samples) - 1) - np.pi / 2
         v_data = np.random.uniform(0, 2 * np.pi, num_samples)
@@ -289,12 +508,17 @@ class SphereApproximation(ThreeDScene):
         outputs = generate_outputs(x_data, y_data, z_data)
 
         # Draw the sampled data points
-        # self.play(*[FadeIn(Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2])) for d in display_points])
-        # self.play(FadeOut(true_surface))
-        # self.wait(5)
+        self.play(Create(true_surface))
+        self.wait(2)
+        dots = [Dot3D(point=d, color=RED, radius=0.05, resolution=[5,5]) for d in display_points]
+        self.play(*[FadeIn(d) for d in dots])
+        self.play(FadeOut(true_surface))
+        self.wait(1)
 
-        net = Fourier(in_size=2, out_size=3, fourier_order=8, hidden_size=hidden_size, hidden_layers=hidden_layers)
+        # net = Fourier(in_size=2, out_size=3, fourier_order=8, hidden_size=hidden_size, hidden_layers=hidden_layers)
+        net = SkipConn(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers)
         
+        print('before')
         approx_surface = approximate_surface(self,
                                             net,
                                             inputs,
@@ -307,41 +531,67 @@ class SphereApproximation(ThreeDScene):
                                             sched_step_size=step_size)
 
 
+def get_spiral_shell():
+    r = 1
+    a = 1.25
+    b = 1.25
+    c = 1
+    d = 3.5
+    e = 0
+    f = 0.17
+    h = -1
+    def spiral_shell(u, v):
+        exp = pow(np.e, f*u)
+
+        x = r*exp * (-1.4*e + b*np.sin(v))
+        y = r*exp * (d + a*np.cos(v)) * np.sin(c*u)
+        z = r*exp * (d + a*np.cos(v)) * np.cos(c*u) + h
+
+        return np.array([x, y, z])
+    return spiral_shell
+
+
+class SpiralSurface(ThreeDScene):
+    def construct(self):
+        # create a parametric surface using the spiral shell function for 10 seconds resolution 60, 60
+        u_range = [-25, 0]
+        v_range = [-2*PI, 2*PI]
+        surface = Surface(
+            get_spiral_shell(),
+            resolution=(60, 60),
+            u_range=u_range,
+            v_range=v_range,
+            checkerboard_colors=[GOLD, GOLD_E],
+            stroke_color=GOLD_E
+        )
+        self.set_camera_orientation(phi=75 * DEGREES, theta=50 * DEGREES)
+        self.begin_ambient_camera_rotation(rate=0.2)
+
+        self.play(Create(surface), run_time=2)
+        self.wait(15)
+
+
 class SpiralApproximation(ThreeDScene):
     def construct(self):
-        epochs = 200
+        epochs = 20
         lr = 0.001
         batch_size = 20
         num_samples = 3000
-        num_display_samples = 300
-        hidden_size = 100
-        hidden_layers = 10
-        step_size = 5
-        nn_range = [-PI, PI]
-    
-        r = 1
-        a = 1.25
-        b = 1.25
-        c = 1
-        d = 3.5
-        e = 0
-        f = 0.17
-        h = -1
+        num_display_samples = 150
+        hidden_size = 300
+        hidden_layers = 30
+        step_size = 15
+        nn_range = [-1, 1]
+
         u_range = [-25, 0]
-        v_range = [-4*PI, 4*PI]
+        v_range = [-2*PI, 2*PI]
         resolution=(40, 40)
 
         self.set_camera_orientation(phi=75 * DEGREES, theta=50 * DEGREES)
         self.begin_ambient_camera_rotation(rate=0.2)
-
-        def spiral_shell(u, v):
-            exp = pow(np.e, f*u)
-
-            x = r*exp * (-1.4*e + b*np.sin(v))
-            y = r*exp * (d + a*np.cos(v)) * np.sin(c*u)
-            z = r*exp * (d + a*np.cos(v)) * np.cos(c*u) + h
-
-            return np.array([x, y, z])
+    
+        # spiral shell parameters
+        spiral_shell = get_spiral_shell()
 
         # Create the parametric surface
         surface = Surface(
@@ -364,9 +614,10 @@ class SpiralApproximation(ThreeDScene):
         
         self.play(Create(surface))
         self.wait(2)
-        self.add(*[Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2]) for d in display_points])
+        dots = [Dot3D(point=d, color=RED, radius=0.05, resolution=[5,5]) for d in display_points]
+        self.play(*[FadeIn(d) for d in dots])
         self.wait()
-        self.play(Uncreate(surface), run_time=2)
+        self.play(FadeOut(surface), run_time=1)
 
         # net = SkipConn(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers)
         net = Fourier(in_size=2, out_size=3, fourier_order=16, hidden_size=hidden_size, hidden_layers=hidden_layers)
@@ -381,19 +632,19 @@ class SpiralApproximation(ThreeDScene):
                                             lr=lr, 
                                             batch_size=batch_size, 
                                             sched_step_size=step_size)
-        self.wait(1)
+        self.wait(10)
 
 
 class CubeApproximation(ThreeDScene):
     def construct(self):
-        epochs = 1
+        epochs = 50
         lr = 0.001
         batch_size = 20
         num_samples = 500
-        num_display_samples = 300
+        num_display_samples = 50
         hidden_size = 100
         hidden_layers = 10
-        step_size = 5
+        step_size = 10
         nn_range = [-1, 1]
 
         u_range = [-1, 1]
@@ -407,14 +658,40 @@ class CubeApproximation(ThreeDScene):
         num_faces = 4
         step_size = range_size / num_faces
         offset = range_size/2
+        # def cube(u, v):
+        #     if (u <= -step_size):
+        #         return np.array([(u+step_size)*num_faces, v, offset])
+        #     if (u <= 0):
+        #         return np.array([0, v, -(u+step_size)*num_faces + offset])
+        #     if (u <= step_size):
+        #         return np.array([-u*num_faces, v, -num_faces/2 + offset])
+        #     return np.array([-num_faces/2, v, (u-step_size*2)*num_faces + offset])
+        
         def cube(u, v):
-            if (u <= -step_size):
-                return np.array([(u+step_size)*num_faces, v, offset])
-            if (u <= 0):
-                return np.array([0, v, -(u+step_size)*num_faces + offset])
-            if (u <= step_size):
-                return np.array([-u*num_faces, v, -num_faces/2 + offset])
-            return np.array([-num_faces/2, v, (u-step_size*2)*num_faces + offset])
+            u_scalar = np.isscalar(u)
+            v_scalar = np.isscalar(v)
+            
+            u = np.array([u]) if u_scalar else u
+            v = np.array([v]) if v_scalar else v
+
+            x1 = np.where(u <= -step_size, (u + step_size) * num_faces, 0)
+            x2 = np.where(np.logical_and(-step_size < u, u <= 0), 0, x1)
+            x3 = np.where(np.logical_and(0 < u, u <= step_size), -u * num_faces, x2)
+            x = np.where(u > step_size, -num_faces / 2, x3)
+
+            z1 = np.where(u <= -step_size, offset, 0)
+            z2 = np.where(np.logical_and(-step_size < u, u <= 0), -(u + step_size) * num_faces + offset, z1)
+            z3 = np.where(np.logical_and(0 < u, u <= step_size), -num_faces / 2 + offset, z2)
+            z = np.where(u > step_size, (u - step_size * 2) * num_faces + offset, z3)
+
+            result = np.array([x, v, z])
+
+            if u_scalar and v_scalar:
+                result = result.flatten()
+
+            return result
+
+
         
         # Create the parametric surface
         surface = Surface(
@@ -426,13 +703,31 @@ class CubeApproximation(ThreeDScene):
             should_make_jagged=True
         )
 
-        # u_data = np.random.uniform(u_range[0], u_range[1], num_samples)
-        # v_data = np.random.uniform(v_range[0], v_range[1], num_samples)
-        # x_data, y_data, z_data = cube(u_data, v_data)
+        u_data = np.random.uniform(u_range[0], u_range[1], num_samples)
+        v_data = np.random.uniform(v_range[0], v_range[1], num_samples)
+        x_data, y_data, z_data = cube(u_data, v_data)
+        inputs = generate_inputs(u_data, v_data, u_range, v_range, nn_range)
+        outputs = generate_outputs(x_data, y_data, z_data)
 
-        # display_points = generate_display_points(x_data, y_data, z_data, num_display_samples)
+        display_points = generate_display_points(x_data, y_data, z_data, num_display_samples)
 
-        # self.play(*[FadeIn(Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2])) for d in display_points])
-
-        self.add(surface)
+        self.play(Create(surface))
         self.wait(2)
+        self.add(*[Dot3D(point=d, color=RED, radius=0.05, resolution=[2,2]) for d in display_points])
+        self.wait()
+        self.play(Uncreate(surface), run_time=2)
+
+        net = SkipConn(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers)
+
+        approx_surface = approximate_surface(self,
+                                            net,
+                                            inputs,
+                                            outputs,
+                                            nn_range,
+                                            resolution=resolution,
+                                            epochs=epochs,
+                                            lr=lr,
+                                            batch_size=batch_size,
+                                            sched_step_size=step_size)
+        self.wait(1)
+
