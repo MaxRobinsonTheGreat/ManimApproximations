@@ -3,8 +3,9 @@ from torch import nn, optim
 import numpy as np
 from manim import *
 import random
-from models import SimpleNN, SkipConn, Fourier, SimpleTaylorNN, TaylorNN
-
+from models import SimpleNN, SkipConn, Fourier, SimpleTaylorNN, TaylorNN, RecurrentNN, AdaptiveExpertNN
+from shared import create_weights_matricies
+from kan import KANLinear
 
 def LearnCurve( scene,
                 target_function,
@@ -12,6 +13,7 @@ def LearnCurve( scene,
                 epochs = 10,
                 lr = 0.005,
                 batch_size = 20,
+
                 frame_rate = 5,
                 frame_duration = 0.1,
                 num_samples = 300,
@@ -101,29 +103,28 @@ def LearnCurve( scene,
         scene.remove(ax, approx_graph, data_points)
 
 
-def create_weights_matricies(net):
-    matricies = []
-    bias, weight = None, None
-    for name, param in net.named_parameters():
-        if name.find('bias') != -1:
-            bias = param.data
-        elif name.find('weight') != -1:
-            weight = param.data
-        if bias is not None and weight is not None:
-            # print(bias, weight)
-            bias = bias.unsqueeze(1)
-            matrix = torch.cat((bias, weight), dim=1).numpy()
-            # round to 3 decimal places
-            matrix = np.round(matrix, 3)
-            bias, weight = None, None
-            # display matrix as mojbect
-            matrix = Matrix(matrix, h_buff=2)
-            if len(matricies) > 0:
-                matrix.next_to(matricies[-1], RIGHT)
-            matricies.append(matrix)
-    group = VGroup(*matricies).center().shift(DOWN)
-    return group
+class LearnSimpleTest(Scene):
+    def construct(self):
+        net = SimpleNN(hidden_size=20, hidden_layers=4, activation=nn.GELU)
+        # net = SkipConn(hidden_size=10, hidden_layers=4)
+        # net = SkipConn(hidden_size=50, hidden_layers=7)
+        # net = AdaptiveExpertNN(hidden_size=20, num_experts=2, fourier_order=1)
+        # net = KolmogorovNetwork(in_size=1, out_size=1, inner_size=64, num_inner_funcs=5)
+        # net = KANLinear(in_features=1, out_features=1, grid_size=5, spline_order=3, scale_noise=0.1, scale_base=1.0, scale_spline=1.0, enable_standalone_scale_spline=True, base_activation=torch.nn.SiLU, grid_eps=0.02, grid_range=[-1, 1])
 
+        def sine(x):
+            return np.sin(3*x)
+
+        LearnCurve(self, sine, net,
+                    epochs=10,
+                    lr=0.01,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=300,
+                    x_range=[-PI, PI],
+                    sched_step=10,
+                    smooth=False)
 
 class LearnSimple(Scene):
     def construct(self):
@@ -218,6 +219,24 @@ class LearnTiny(Scene):
                     sched_step=10,
                     smooth=False,
                     show_weights=True)
+
+
+class LearnRecurrent(Scene):
+    def construct(self):
+        net = RecurrentNN(hidden_size=50, hidden_layers=5, iterations=2)
+
+        def target_function(x):
+            return np.sin(2*x) - np.cos(3*x)
+
+        LearnCurve(self, target_function, net,
+                    epochs=50,
+                    lr=0.001,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=200,
+                    x_range=[-PI, PI],
+                    sched_step=10)
 
 
 class LearnWithLoss(Scene):
@@ -465,7 +484,7 @@ def approximate_surface(scene,
 class SphereApproximation(ThreeDScene):
     def construct(self):
         # Define the parametric surface function for a sphere
-        epochs = 100
+        epochs = 15
         lr = 0.001
         batch_size = 20
         num_samples = 1000
@@ -508,15 +527,17 @@ class SphereApproximation(ThreeDScene):
         outputs = generate_outputs(x_data, y_data, z_data)
 
         # Draw the sampled data points
-        self.play(Create(true_surface))
-        self.wait(2)
-        dots = [Dot3D(point=d, color=RED, radius=0.05, resolution=[5,5]) for d in display_points]
-        self.play(*[FadeIn(d) for d in dots])
-        self.play(FadeOut(true_surface))
-        self.wait(1)
+        # self.play(Create(true_surface))
+        # self.wait(2)
+        # dots = [Dot3D(point=d, color=RED, radius=0.05, resolution=[5,5]) for d in display_points]
+        # self.play(*[FadeIn(d) for d in dots])
+        # self.play(FadeOut(true_surface))
+        # self.wait(1)
 
         # net = Fourier(in_size=2, out_size=3, fourier_order=8, hidden_size=hidden_size, hidden_layers=hidden_layers)
-        net = SkipConn(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers)
+        net = SkipConn(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers, activation=nn.GELU)
+        # net = SimpleNN(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers, activation=nn.GELU)
+        # net = KANLinear(in_features=2, out_features=3, grid_size=5, spline_order=3, scale_noise=0.1, scale_base=1.0, scale_spline=1.0, enable_standalone_scale_spline=True, base_activation=torch.nn.SiLU, grid_eps=0.02, grid_range=[-1, 1])
         
         print('before')
         approx_surface = approximate_surface(self,
