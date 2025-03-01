@@ -3,8 +3,9 @@ from torch import nn, optim
 import numpy as np
 from manim import *
 import random
-from models import SimpleNN, SkipConn, Fourier, SimpleTaylorNN, TaylorNN
-
+from models import SimpleNN, SkipConn, Fourier, SimpleTaylorNN, TaylorNN, RecurrentNN, AdaptiveExpertNN
+from shared import create_weights_matricies
+from kan import KANLinear
 
 def LearnCurve( scene,
                 target_function,
@@ -12,11 +13,13 @@ def LearnCurve( scene,
                 epochs = 10,
                 lr = 0.005,
                 batch_size = 20,
+                optimizer = "adam",
                 frame_rate = 5,
                 frame_duration = 0.1,
                 num_samples = 300,
                 x_range = [-PI, PI],
                 sched_step = 10,
+                sched_gamma = 0.5,
                 smooth = True,
                 show_loss = False, 
                 show_weights = False,):
@@ -29,10 +32,16 @@ def LearnCurve( scene,
         x_data = np.random.uniform(x_range[0], x_range[1], num_samples)
         y_data = target_function(x_data)
 
-        optimizer = optim.Adam(net.parameters(), lr=lr)
+        if optimizer == "adam":
+            optimizer = optim.Adam(net.parameters(), lr=lr)
+        elif optimizer == "sgd":
+            optimizer = optim.SGD(net.parameters(), lr=lr, momentum=0.9)
+        else:
+            raise ValueError("Invalid optimizer")
+        
         # criteron = lambda x, y: torch.mean(torch.abs(x - y))
         criteron = nn.MSELoss()
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=sched_step, gamma=0.5)
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=sched_step, gamma=sched_gamma)
 
         def approx_func(x):
             return net(torch.tensor([[x]], dtype=torch.float32)).squeeze().cpu().detach().numpy()
@@ -48,11 +57,11 @@ def LearnCurve( scene,
         scene.play(Create(data_points))
 
         # Draw the initial approximated function
-        approx_graph = ax.plot(approx_func, x_range=x_range, color=BLUE)
+        approx_graph = ax.plot(approx_func, x_range=x_range, color=BLUE, use_smoothing=smooth)
         scene.play(Create(approx_graph))
 
         if show_loss:
-            loss_label = MathTex('Loss: ', '{:.4f}'.format(0)).scale(1.5).to_corner(UL)
+            loss_label = MathTex('Loss: ', '{:.4f}'.format(1)).to_corner(UL)
             scene.add(loss_label)
 
         if show_weights:
@@ -79,7 +88,7 @@ def LearnCurve( scene,
 
                 running_loss += loss.item()
                 if i % frame_rate == 0: 
-                    new_approx_graph = ax.plot(approx_func, x_range=x_range, color=BLUE)
+                    new_approx_graph = ax.plot(approx_func, x_range=x_range, color=BLUE, use_smoothing=smooth)
                     scene.play(ReplacementTransform(approx_graph, new_approx_graph), run_time=frame_duration, rate_func=linear)
                     approx_graph = new_approx_graph
                     scene.add(approx_graph)
@@ -87,7 +96,7 @@ def LearnCurve( scene,
                     if show_loss:
                         scene.remove(loss_label)
                         avg_loss = running_loss / (i+1)
-                        loss_label = MathTex('Loss: ', '{:.4f}'.format(avg_loss)).scale(1.5).to_corner(UL)
+                        loss_label = MathTex('Loss: ', '{:.4f}'.format(avg_loss)).to_corner(UL)
                         scene.add(loss_label)
 
                     if show_weights:
@@ -95,45 +104,56 @@ def LearnCurve( scene,
                         weights_matricies = create_weights_matricies(net)
                         scene.add(weights_matricies)
 
-            print('Epoch: {}, Loss: {:.10f}'.format(epoch, running_loss / num_samples))
+            print('Epoch: {}, Loss: {:.10f}'.format(epoch, running_loss / batch_size))
             scheduler.step()
+
+        if show_loss:
+            # evaluate loss over entire dataset
+            inputs = torch.Tensor([[x] for x in x_data])
+            labels = torch.Tensor([[y] for y in y_data])
+            loss = criteron(net(inputs), labels)
+            scene.remove(loss_label)
+            loss_label = MathTex('Loss: ', '{:.4f}'.format(loss.item())).to_corner(UL)
+            scene.add(loss_label)
+
         scene.wait()
         scene.remove(ax, approx_graph, data_points)
 
 
-def create_weights_matricies(net):
-    matricies = []
-    bias, weight = None, None
-    for name, param in net.named_parameters():
-        if name.find('bias') != -1:
-            bias = param.data
-        elif name.find('weight') != -1:
-            weight = param.data
-        if bias is not None and weight is not None:
-            # print(bias, weight)
-            bias = bias.unsqueeze(1)
-            matrix = torch.cat((bias, weight), dim=1).numpy()
-            # round to 3 decimal places
-            matrix = np.round(matrix, 3)
-            bias, weight = None, None
-            # display matrix as mojbect
-            matrix = Matrix(matrix, h_buff=2)
-            if len(matricies) > 0:
-                matrix.next_to(matricies[-1], RIGHT)
-            matricies.append(matrix)
-    group = VGroup(*matricies).center().shift(DOWN)
-    return group
-
-
 class LearnSimple(Scene):
+    def construct(self):
+        # net = SimpleNN(hidden_size=20, hidden_layers=4, activation=nn.GELU)
+        net = SkipConn(hidden_size=20, hidden_layers=4, activation=nn.GELU)
+        # net = SkipConn(hidden_size=50, hidden_layers=7)
+        # net = AdaptiveExpertNN(hidden_size=20, num_experts=2, fourier_order=1)
+        # net = KolmogorovNetwork(in_size=1, out_size=1, inner_size=64, num_inner_funcs=5)
+        # net = KANLinear(in_features=1, out_features=1, grid_size=5, spline_order=3, scale_noise=0.1, scale_base=1.0, scale_spline=1.0, enable_standalone_scale_spline=True, base_activation=torch.nn.SiLU, grid_eps=0.02, grid_range=[-1, 1])
+        # net = RecurrentNN(hidden_size=20, hidden_layers=4, iterations=4)
+
+        def target(x):
+            return np.sin(3*x) + np.cos(2*x) + np.sin(x) + np.cos(3*x)
+
+        LearnCurve(self, target, net,
+                    epochs=50,
+                    lr=0.005,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=300,
+                    x_range=[-PI, PI],
+                    sched_step=10,
+                    smooth=True)
+
+class LearnSimpleMany(Scene):
     def construct(self):
         net = SkipConn(hidden_size=50, hidden_layers=7)
 
-        def sine(x):
-            return np.sin(3*x)
+        # complicated interesting function
+        def target(x):
+            return np.sin(3*x) + np.cos(2*x) + np.sin(x) + np.cos(3*x)
 
-        LearnCurve(self, sine, net,
-                    epochs=30,
+        LearnCurve(self, target, net,
+                    epochs=1,
                     lr=0.001,
                     batch_size=20,
                     frame_rate=5,
@@ -145,6 +165,7 @@ class LearnSimple(Scene):
         
         def wavey(x):
             return np.sin(2*x) - np.cos(3*x)
+        
         
         LearnCurve(self, wavey, net,
             epochs=10,
@@ -218,6 +239,46 @@ class LearnTiny(Scene):
                     sched_step=10,
                     smooth=False,
                     show_weights=True)
+
+
+class LearnMassive(Scene):
+    def construct(self):
+        net = SkipConn(hidden_size=100, hidden_layers=20, activation=nn.LeakyReLU)
+        # print the number of parameters
+        print("Number of parameters: ", sum(p.numel() for p in net.parameters()))
+        def target_function(x):
+            # return np.sin(x)
+            return np.sin(6*x) + np.cos(4*x) + np.sin(2*x) + np.cos(6*x)
+
+        LearnCurve(self, target_function, net,
+                    epochs=150,
+                    lr=0.002,
+                    optimizer="adam",
+                    frame_rate=20,
+                    frame_duration=0.2,
+                    num_samples=300,
+                    x_range=[-PI, PI],
+                    sched_step=20,
+                    show_loss=False,
+                    smooth=True)
+
+
+class LearnRecurrent(Scene):
+    def construct(self):
+        net = RecurrentNN(hidden_size=50, hidden_layers=5, iterations=2)
+
+        def target_function(x):
+            return np.sin(2*x) - np.cos(3*x)
+
+        LearnCurve(self, target_function, net,
+                    epochs=50,
+                    lr=0.001,
+                    batch_size=20,
+                    frame_rate=5,
+                    frame_duration=0.2,
+                    num_samples=200,
+                    x_range=[-PI, PI],
+                    sched_step=10)
 
 
 class LearnWithLoss(Scene):
@@ -465,7 +526,7 @@ def approximate_surface(scene,
 class SphereApproximation(ThreeDScene):
     def construct(self):
         # Define the parametric surface function for a sphere
-        epochs = 100
+        epochs = 15
         lr = 0.001
         batch_size = 20
         num_samples = 1000
@@ -508,15 +569,17 @@ class SphereApproximation(ThreeDScene):
         outputs = generate_outputs(x_data, y_data, z_data)
 
         # Draw the sampled data points
-        self.play(Create(true_surface))
-        self.wait(2)
-        dots = [Dot3D(point=d, color=RED, radius=0.05, resolution=[5,5]) for d in display_points]
-        self.play(*[FadeIn(d) for d in dots])
-        self.play(FadeOut(true_surface))
-        self.wait(1)
+        # self.play(Create(true_surface))
+        # self.wait(2)
+        # dots = [Dot3D(point=d, color=RED, radius=0.05, resolution=[5,5]) for d in display_points]
+        # self.play(*[FadeIn(d) for d in dots])
+        # self.play(FadeOut(true_surface))
+        # self.wait(1)
 
         # net = Fourier(in_size=2, out_size=3, fourier_order=8, hidden_size=hidden_size, hidden_layers=hidden_layers)
-        net = SkipConn(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers)
+        net = SkipConn(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers, activation=nn.GELU)
+        # net = SimpleNN(in_size=2, out_size=3, hidden_size=hidden_size, hidden_layers=hidden_layers, activation=nn.GELU)
+        # net = KANLinear(in_features=2, out_features=3, grid_size=5, spline_order=3, scale_noise=0.1, scale_base=1.0, scale_spline=1.0, enable_standalone_scale_spline=True, base_activation=torch.nn.SiLU, grid_eps=0.02, grid_range=[-1, 1])
         
         print('before')
         approx_surface = approximate_surface(self,
